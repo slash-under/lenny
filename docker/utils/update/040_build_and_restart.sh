@@ -20,5 +20,17 @@ if ! $COMPOSE_CMD -p "$LENNY_COMPOSE_PROJECT" build --pull reader; then
     echo ""
 fi
 
+# Build admin / lenny-app frontend (non-critical — warn but don't fail the update)
+# Pulled from its own repo (ArchiveLabs/lenny-app); the Dockerfile's cache-bust
+# ensures this picks up the latest frontend on every update.
+echo "Building admin (lenny-app) image..."
+if ! $COMPOSE_CMD -p "$LENNY_COMPOSE_PROJECT" build --pull admin; then
+    echo ""
+    echo "WARNING: Admin (lenny-app) build failed. The API will still start."
+    echo "The admin UI may use a cached image or be unavailable."
+    echo "To retry the admin build later: $COMPOSE_CMD -p $LENNY_COMPOSE_PROJECT build --no-cache admin"
+    echo ""
+fi
+
 # Restart all services
 $COMPOSE_CMD -p "$LENNY_COMPOSE_PROJECT" up -d

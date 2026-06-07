@@ -35,10 +35,14 @@ class BookUnavailableError(LennyAPIError):
     """Raised when no copies are available for borrowing."""
     pass
 
+class PatronLoanLimitError(LennyAPIError):
+    """Raised when patron has reached their concurrent loan limit."""
+    pass
+
 class LendingNotConfiguredError(LennyAPIError):
-    """Raised when lending is enabled (LENNY_LENDING_ENABLED=true) but no
-    IA S3 keys are present. Operator must run `make ol-login` to
-    authenticate against Open Library before lending routes can serve OTPs."""
+    """Raised when OL lending is the active mode (LENNY_LENDING_MODE=ol) but
+    IA S3 keys are absent, or when the active mode does not match the
+    requested lending operation. Operator must run `make ol-login` first."""
     pass
 
 class InvalidOLCredentialsError(LennyAPIError):

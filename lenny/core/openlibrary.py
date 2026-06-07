@@ -8,6 +8,15 @@ from lenny.configs import LENNY_HTTP_HEADERS
 logger = logging.getLogger(__name__)
 
 
+def _redact_auth_header(request: httpx.Request) -> None:
+    """Prevent OL S3 keys from appearing in httpx debug logs or error traces."""
+    if request.headers.get("Authorization", "").startswith("LOW "):
+        request.headers["Authorization"] = "LOW [REDACTED]"
+
+
+_REDACT_HOOKS = {"request": [_redact_auth_header]}
+
+
 def ol_auth_headers() -> Dict[str, str]:
     """Build headers for an OL request, adding `Authorization: LOW <access>:<secret>`
     when IA S3 keys are configured. Returns a copy so callers can mutate safely."""
@@ -24,10 +33,12 @@ def ol_auth_headers() -> Dict[str, str]:
 def ol_auth_status() -> Dict[str, Any]:
     """Current Lenny<->OL auth state for status/UI consumption. Never returns secrets."""
     from lenny import configs
+    ol_ready = bool(configs.OL_S3_ACCESS_KEY and configs.OL_S3_SECRET_KEY)
     return {
-        "logged_in": bool(configs.OL_S3_ACCESS_KEY and configs.OL_S3_SECRET_KEY),
+        "logged_in": ol_ready,
         "username": configs.OL_USERNAME,
-        "lending_enabled": configs.LENDING_ENABLED,
+        "lending_mode": configs.read_lending_mode(),
+        "ol_ready": ol_ready,
         "ol_indexed": configs.OL_INDEXED,
     }
 
@@ -86,14 +97,25 @@ class OpenLibrary:
     @classmethod
     def search_json(cls, query: str, fields: Optional[List[str]] = None, page: int = 1, limit: int = 100) -> Dict[str, Any]:
         url = cls._construct_search_url(query, fields, page, limit)
-        try:
-            with httpx.Client() as client:
-                response = client.get(url, headers=ol_auth_headers(), timeout=cls.HTTP_TIMEOUT)
-                response.raise_for_status()
-                return response.json()
-        except (httpx.HTTPError, ValueError) as e:
-            logger.error(f"Error searching Open Library: {e}")
-            raise
+        # One retry on transient transport errors (e.g. SSL EOF, connection reset)
+        # which OL occasionally returns under load; a fresh client + new TCP socket
+        # almost always succeeds the second time.
+        last_exc: Optional[Exception] = None
+        for attempt in (1, 2):
+            try:
+                with httpx.Client(event_hooks=_REDACT_HOOKS) as client:
+                    response = client.get(url, headers=ol_auth_headers(), timeout=cls.HTTP_TIMEOUT)
+                    response.raise_for_status()
+                    return response.json()
+            except httpx.TransportError as e:
+                last_exc = e
+                logger.warning(f"OL search transport error (attempt {attempt}): {e}")
+                continue
+            except (httpx.HTTPError, ValueError) as e:
+                logger.error(f"Error searching Open Library: {e}")
+                raise
+        logger.error(f"Error searching Open Library after retry: {last_exc}")
+        raise last_exc  # type: ignore[misc]
 
     
 class OpenLibraryRecord(dict):

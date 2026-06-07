@@ -6,18 +6,19 @@ from itsdangerous import URLSafeTimedSerializer
 from lenny.core import auth
 
 def test_cookie_basic_functionality():
-    """Test basic cookie functionality without IP verification (backward compatibility)"""
-    # Setup test environment
+    """Test cookie functionality without IP — always dict format now."""
     auth.SEED = b"123"
     auth.SERIALIZER = URLSafeTimedSerializer(auth.SEED, salt="auth-cookie")
     email = "example@archive.org"
-    expected_prefix = "ImV4YW1wbGVAYXJjaGl2ZS5vcmci"
-    
-    # Test old format (without IP)
+
     cookie = auth.create_session_cookie(email)
-    
-    assert cookie.startswith(expected_prefix), f"cookie prefix mismatch: {cookie!r}"
+
+    # Cookie is always dict-format (contains {"email": ...})
     assert auth.get_authenticated_email(cookie) == email
+    # verify_session_cookie also works (no IP binding when ip not provided)
+    result = auth.verify_session_cookie(cookie)
+    assert isinstance(result, dict)
+    assert result["email"] == email
     
 def test_cookie_with_ip_verification():
     """Test cookie functionality with IP verification"""

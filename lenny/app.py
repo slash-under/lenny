@@ -5,6 +5,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from lenny.routes import api
+from lenny.routes import oauth as oauth_routes
 from lenny.configs import OPTIONS
 from lenny import __version__ as VERSION
 
@@ -14,8 +15,10 @@ app = FastAPI(
     version=VERSION,
 )
 
-# App-level CORS should be a setting, as to not
-# conflict with CORS handled by nginx
+# CORS is permissive at the app layer because nginx enforces the real security
+# boundary: `location /v1/api/admin { return 403; }` blocks all cross-origin
+# admin calls before they reach this process. Patron endpoints (OPDS, borrow)
+# are intentionally accessible from any origin (OPDS clients, bookreaders, etc.).
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=".*",
@@ -27,6 +30,7 @@ app.add_middleware(
 app.templates = Jinja2Templates(directory="lenny/templates")
 
 app.include_router(api.router, prefix="/v1/api")
+app.include_router(oauth_routes.router, prefix="/v1/api")
 
 app.mount("/static", StaticFiles(directory="lenny/static"), name="static")
 

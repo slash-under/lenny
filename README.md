@@ -48,6 +48,7 @@
 - [Tests](#tests)
 - [Project Structure](#project-structure)
 - [Admin Dashboard](#admin-dashboard)
+- [lenny-app Local Development](#lenny-app-local-development)
 - [Contributing](#contributing)
 - [Pilot](#pilot)
 - [Open Topics](#open-topics)
@@ -69,16 +70,14 @@ Lenny is a free, open source, Library-in-a-Box for libraries to preserve and len
 
 ## 🔐 Authentication Modes
 
-Lenny supports two authentication modes for lending:
+Lenny supports multiple authentication modes for patron login and lending:
 
-1.  **OAuth Implicit (Default)**: Standard OPDS authentication flow. Clients like Thorium Reader use this to request a token via a popup/webview.
-2.  **Direct Token**: A simpler, link-based authentication flow. Useful for environments where full OAuth support is tricky.
-    *   **Browser-Friendly**: Users authenticate via an OTP (One-Time Password) email directly in the browser.
-    *   **How to Enable**: This mode is **dynamic** and applies per-session.
-    *   **Trigger**: Append `?auth_mode=direct` (or legacy `?beta=true` for backward compatibility) to any OPDS feed URL (e.g. `/v1/api/opds?auth_mode=direct`).
-    *   **Sticky Session**: Once entered, the session remembers the mode, and all generated links (navigation, shelf, profile) will automatically keep you in that mode.
+1.  **OTP / Open Library (Default)**: Standard OPDS authentication flow. Patrons authenticate via a one-time-password email. Clients like Thorium Reader use this via a popup/webview.
+2.  **Direct Token**: A simpler, link-based flow for environments where full OAuth support is tricky. Append `?auth_mode=direct` (or legacy `?beta=true`) to any OPDS feed URL to activate per-session.
+3.  **External OAuth / OIDC** *(optional)*: Delegate patron authentication to any OIDC-compliant provider (Clerk, Auth0, Okta, Keycloak, Google, etc.) using a PKCE authorization-code flow. Configure the provider in the Admin UI under **Settings → Auth**. When enabled, the lending mode switches to `external` and all patron logins are redirected to the provider — no OTP email needed.
+4.  **IA S3 Patron Auth** *(optional)*: Patrons with an Internet Archive account can authenticate directly using their IA S3 access/secret key pair (`Authorization: LOW <access>:<secret>`). Enabled independently of the lending mode via `IA_AUTH_ENABLED` (toggle in Admin UI or set in `auth.env`). Useful for IA-native clients and automation.
 
-To switch back to OAuth mode, simply visit the root feed without the parameter (after clearing cookies/session if necessary).
+To switch back to OTP mode from external auth, set lending mode to `ol` or `none` via the Admin UI.
 
 ---
 
@@ -93,6 +92,8 @@ To switch back to OAuth mode, simply visit the root feed without the parameter (
 - **Database-backed**: Uses PostgreSQL and SQLAlchemy.
 - **Admin UI**: Secure admin dashboard served at `/admin`, isolated from public API access.
 - **Encrypted/Unencrypted Item Filtering**: Filter catalog items by encryption status via API.
+- **External OIDC Patron Auth**: Plug in any OIDC provider for patron login — no password management required.
+- **IA S3 Patron Auth**: Patrons authenticate with Internet Archive S3 credentials; toggled independently of the lending mode.
 
 ---
 ## OPDS 2.0 Feed
@@ -188,6 +189,68 @@ Change these variables in your `.env` or it will use system generated credential
 ```env
 ADMIN_USERNAME=your-username
 ADMIN_PASSWORD=your-secure-password
+```
+
+---
+
+## lenny-app Local Development
+
+The admin UI lives in a separate repo ([lenny-app](https://github.com/ArchiveLabs/lenny-app)). By default Lenny runs the built admin container (`lenny_admin`) at `/admin`. To develop lenny-app locally against a running Lenny backend, two changes are needed.
+
+### 1 — Expose the FastAPI port in `compose.yaml`
+
+The admin UI communicates with FastAPI directly (bypassing nginx, which blocks `/v1/api/admin` externally). Add a host-binding to the `api` service so the local Next.js dev server can reach it:
+
+```yaml
+# compose.yaml — api service ports section
+ports:
+  - "${LENNY_PORT:-8080}:80"
+  - "127.0.0.1:1337:1337"  # local lenny-app dev only — remove for production
+```
+
+Then recreate the container to pick up the new binding:
+
+```sh
+docker compose up -d --no-deps api
+```
+
+> The `127.0.0.1:` prefix ensures port 1337 is only accessible from your machine, not the network.
+
+### 2 — Configure lenny-app `.env.local`
+
+In the lenny-app repo, create `apps/web/.env.local` with the following values (copy credentials from your Lenny `auth.env`):
+
+```env
+# Points the Next.js server-side proxy directly to FastAPI (bypasses nginx admin block)
+LENNY_INTERNAL_API_URL=http://localhost:1337/v1/api
+
+# Points client-side catalog/public fetches to nginx
+NEXT_PUBLIC_API_URL=http://localhost:8080
+
+# Must match ADMIN_INTERNAL_SECRET in lenny/auth.env exactly
+ADMIN_INTERNAL_SECRET=<value from auth.env>
+
+# Must match ADMIN_USERNAME / ADMIN_PASSWORD in lenny/auth.env exactly
+ADMIN_USERNAME=<value from auth.env>
+ADMIN_PASSWORD=<value from auth.env>
+```
+
+Then start the lenny-app dev server:
+
+```sh
+cd lenny-app
+pnpm dev
+# admin UI available at http://localhost:3002/admin
+```
+
+> Access lenny-app directly at `localhost:3002/admin` — do not go through nginx at port 8080 during local dev (nginx routes `/admin` to the built Docker container, not the dev server).
+
+### Reverting to the built container
+
+To restore the standard Docker setup, remove the `127.0.0.1:1337:1337` line from `compose.yaml` and run:
+
+```sh
+docker compose up -d --no-deps api
 ```
 
 ## Adding Books encrypted or unencrypted
