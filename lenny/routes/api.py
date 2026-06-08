@@ -948,7 +948,7 @@ async def get_lending_mode(request: Request):
         "ol_ready": ol_ready,
         "external_auth_enabled": cfg.enabled,
         "external_auth_ready": cfg.enabled and cfg.is_configured(),
-        "ia_auth_enabled": configs.IA_AUTH_ENABLED,
+        "ia_auth_enabled": configs.read_ia_auth_enabled(),
     })
 
 
@@ -1011,7 +1011,7 @@ async def get_auth_mode_settings(request: Request):
         "ol_ready": ol_ready,
         "external_auth_ready": cfg.enabled and cfg.is_configured(),
         "external_auth_enabled": cfg.enabled,
-        "ia_auth_enabled": configs.IA_AUTH_ENABLED,
+        "ia_auth_enabled": configs.read_ia_auth_enabled(),
     })
 
 

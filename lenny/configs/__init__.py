@@ -57,6 +57,7 @@ LOAN_DURATION_DAYS = int(os.environ.get('LENNY_LOAN_DURATION_DAYS', 0))  # 0 = n
 # (written by the admin endpoints). Read it per-request so all workers agree even
 # though each caches its own boot-time globals above.
 LOAN_ENV_PATH = '/app/loan.env'
+AUTH_ENV_PATH = '/app/auth.env'
 # ol.env is the cross-worker source of truth for the active lending mode
 # (LENNY_LENDING_MODE), written by the admin endpoints. Same rationale as
 # loan.env: read it fresh so every worker agrees after an admin change.
@@ -140,6 +141,17 @@ def read_lending_mode() -> str:
     if raw is not None and raw != "":
         return raw
     return LENDING_MODE
+
+
+def read_ia_auth_enabled() -> bool:
+    """Authoritative IA_AUTH_ENABLED flag (auth.env → global fallback).
+
+    Reads fresh from auth.env on every call so all workers agree immediately
+    after an admin toggle — same pattern as read_lending_mode()."""
+    raw = _read_env_value(AUTH_ENV_PATH, 'IA_AUTH_ENABLED')
+    if raw is not None:
+        return raw.strip().lower() == "true"
+    return IA_AUTH_ENABLED
 
 
 def get_loan_limit() -> int:

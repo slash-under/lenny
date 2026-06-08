@@ -40,8 +40,11 @@ class AuthModeManager:
         return cfg.enabled and cfg.is_configured()
 
     def is_ia_s3_enabled(self) -> bool:
-        """True when IA_AUTH_ENABLED flag is set."""
-        return bool(configs.IA_AUTH_ENABLED)
+        """True when IA_AUTH_ENABLED flag is set.
+
+        Reads auth.env fresh (same as read_lending_mode) so all workers reflect
+        an admin toggle immediately without restart."""
+        return configs.read_ia_auth_enabled()
 
     def get_oidc_config(self) -> OAuthConfig:
         """Return a fresh OAuthConfig from auth.env."""
