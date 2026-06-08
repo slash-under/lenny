@@ -49,44 +49,46 @@ LennyDataProvider.BASE_URL = _make_url("/v1/api/")
 # pyopds2_lenny library (pinned to commit 356518d). Patch them here so
 # routes and tests can use/mock them without touching the library.
 
-@classmethod
-def _lenny_empty_catalog(cls, limit: int = 50, auth_mode_direct: bool = False) -> dict:
-    base = cls.BASE_URL
-    return {
-        "@context": "https://readium.org/webpub-manifest/context.jsonld",
-        "metadata": {"title": cls.TITLE, "numberOfItems": 0},
-        "publications": [],
-        "links": [
-            {"rel": "self", "href": f"{base}opds", "type": "application/opds+json"},
-            {"rel": "search", "href": f"{base}opds/search{{?query}}", "type": "application/opds+json", "templated": True},
-        ],
-        "navigation": [],
-    }
+def _lenny_catalog_links(base: str) -> list:
+    return [
+        Link(rel="self", href=f"{base}opds", type="application/opds+json"),
+        Link(
+            rel="search",
+            href=f"{base}opds/search{{?query}}",
+            type="application/opds+json",
+            templated=True,
+        ),
+        Link(rel="http://opds-spec.org/shelf", href=f"{base}shelf", type="application/opds+json"),
+        Link(rel="profile", href=f"{base}profile", type="application/opds-profile+json"),
+    ]
 
 
 @classmethod
-def _lenny_build_catalog(cls, search_response, auth_mode_direct: bool = False) -> dict:
-    base = cls.BASE_URL
+def _lenny_empty_catalog(cls, limit: int = 50, auth_mode_direct: bool = False, title: str = "Lenny Catalog") -> dict:
+    catalog = Catalog(
+        metadata=Metadata(title=title, numberOfItems=0),
+        links=_lenny_catalog_links(cls.BASE_URL),
+        publications=[],
+    )
+    return catalog.model_dump(exclude_none=True)
+
+
+@classmethod
+def _lenny_build_catalog(cls, search_response, auth_mode_direct: bool = False, title: str = "Lenny Catalog") -> dict:
     publications = []
     for record in search_response.records:
         if isinstance(record, LennyDataRecord):
             record.auth_mode_direct = auth_mode_direct
         pub = record.to_publication()
         pub_dict = pub.model_dump(exclude_none=True)
-        pub_dict["links"] = [
-            lnk.model_dump(exclude_none=True) for lnk in record.links()
-        ]
+        pub_dict["links"] = [lnk.model_dump(exclude_none=True) for lnk in record.links()]
         publications.append(pub_dict)
-    return {
-        "@context": "https://readium.org/webpub-manifest/context.jsonld",
-        "metadata": {"title": cls.TITLE, "numberOfItems": len(publications)},
-        "publications": publications,
-        "links": [
-            {"rel": "self", "href": f"{base}opds", "type": "application/opds+json"},
-            {"rel": "search", "href": f"{base}opds/search{{?query}}", "type": "application/opds+json", "templated": True},
-        ],
-        "navigation": [],
-    }
+    catalog = Catalog(
+        metadata=Metadata(title=title, numberOfItems=len(publications)),
+        links=_lenny_catalog_links(cls.BASE_URL),
+        publications=publications,
+    )
+    return catalog.model_dump(exclude_none=True)
 
 
 @classmethod
@@ -95,9 +97,7 @@ def _lenny_build_publication(cls, record, auth_mode_direct: bool = False) -> dic
         record.auth_mode_direct = auth_mode_direct
     pub = record.to_publication()
     pub_dict = pub.model_dump(exclude_none=True)
-    pub_dict["links"] = [
-        lnk.model_dump(exclude_none=True) for lnk in record.links()
-    ]
+    pub_dict["links"] = [lnk.model_dump(exclude_none=True) for lnk in record.links()]
     return pub_dict
 
 
