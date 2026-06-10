@@ -109,6 +109,17 @@ url:
 update:
 	@bash docker/utils/update.sh
 
+# Remove dangling images and cap build cache to free disk/memory.
+# Safe: never touches running containers, named volumes, or DB data.
+# Run manually after updates or whenever disk usage is high.
+.PHONY: prune
+prune:
+	@echo "Pruning dangling images..."
+	@docker image prune -f
+	@echo "Capping build cache to 2 GB..."
+	@docker builder prune -f --reserved-space=2gb
+	@echo "Done."
+
 # Log in to archive.org/openlibrary.org and store IA S3 keys in .env.
 # Idempotent — safe to re-run. Use to log in, re-login with a different account,
 # or recover from a failed lending setup.

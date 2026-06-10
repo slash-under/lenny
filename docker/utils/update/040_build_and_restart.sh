@@ -31,13 +31,5 @@ if ! $COMPOSE_CMD -p "$LENNY_COMPOSE_PROJECT" build admin; then
     echo ""
 fi
 
-# Prune dangling images (old untagged builds). Safe: never touches named volumes,
-# running containers, or BuildKit cache mounts (pnpm_store etc.).
-# Builder cache capped at 2 GB — preserves pnpm/pip layer caches that make
-# future builds fast while preventing unbounded disk growth.
-echo "Pruning dangling images and capping build cache..."
-docker image prune -f || true
-docker builder prune -f --reserved-space=2gb || true
-
 # Restart all services
 $COMPOSE_CMD -p "$LENNY_COMPOSE_PROJECT" up -d
