@@ -1,4 +1,4 @@
-FROM node:20-slim AS base
+FROM node:22-slim AS base
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 
@@ -16,8 +16,8 @@ ARG LENNY_APP_REF=ab430e1ef3bb23441943cc2f62b2c5e526f95913
 RUN git clone https://github.com/ArchiveLabs/lenny-app . && \
     git checkout "$LENNY_APP_REF"
 
-# Install all workspace deps (no cache mount — fully clean install)
-RUN pnpm install --frozen-lockfile
+# Install workspace deps with BuildKit cache mount so packages survive between builds.
+RUN --mount=type=cache,id=pnpm_store_lenny_app,target=/pnpm/store pnpm install --frozen-lockfile
 
 # Build only the web app
 ARG NEXT_PUBLIC_API_URL=
