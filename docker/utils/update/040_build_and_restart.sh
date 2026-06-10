@@ -13,32 +13,20 @@ cd "$LENNY_ROOT"
 echo "Building API image..."
 $COMPOSE_CMD -p "$LENNY_COMPOSE_PROJECT" build api
 
-# Build reader and admin in parallel (non-critical — warn but don't fail)
-echo "Building reader and admin images..."
-reader_failed=0
-admin_failed=0
-
-$COMPOSE_CMD -p "$LENNY_COMPOSE_PROJECT" build reader admin || {
-    # Re-run individually to get specific failure info
-    if ! $COMPOSE_CMD -p "$LENNY_COMPOSE_PROJECT" build reader 2>/dev/null; then
-        reader_failed=1
-    fi
-    if ! $COMPOSE_CMD -p "$LENNY_COMPOSE_PROJECT" build admin 2>/dev/null; then
-        admin_failed=1
-    fi
-}
-
-if [ "$reader_failed" -eq 1 ]; then
+# Build reader (non-critical — warn but don't fail)
+echo "Building reader image..."
+if ! $COMPOSE_CMD -p "$LENNY_COMPOSE_PROJECT" build reader; then
     echo ""
     echo "WARNING: Reader build failed. The API will still start."
-    echo "The reader may use a cached image or be unavailable."
     echo "To retry: $COMPOSE_CMD -p $LENNY_COMPOSE_PROJECT build --no-cache reader"
     echo ""
 fi
-if [ "$admin_failed" -eq 1 ]; then
+
+# Build admin (non-critical — warn but don't fail)
+echo "Building admin image..."
+if ! $COMPOSE_CMD -p "$LENNY_COMPOSE_PROJECT" build admin; then
     echo ""
-    echo "WARNING: Admin (lenny-app) build failed. The API will still start."
-    echo "The admin UI may use a cached image or be unavailable."
+    echo "WARNING: Admin build failed. The API will still start."
     echo "To retry: $COMPOSE_CMD -p $LENNY_COMPOSE_PROJECT build --no-cache admin"
     echo ""
 fi
