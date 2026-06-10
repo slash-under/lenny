@@ -32,5 +32,12 @@ if ! $COMPOSE_CMD -p "$LENNY_COMPOSE_PROJECT" build --pull admin; then
     echo ""
 fi
 
+# Prune stale build cache and dangling images from prior updates.
+# Safe: only removes layers/images not referenced by any running container or volume.
+# db_data and all other named volumes are never touched by these commands.
+echo "Pruning stale build cache and dangling images..."
+docker builder prune -f --filter until=24h || true
+docker image prune -f || true
+
 # Restart all services
 $COMPOSE_CMD -p "$LENNY_COMPOSE_PROJECT" up -d
