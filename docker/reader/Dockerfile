@@ -1,8 +1,9 @@
-FROM node:20-slim AS base
+FROM node:22-slim AS base
 
 # Set environment variables for PNPM
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
+ENV CI=true
 
 # Build arguments - values provided by compose.yaml or --build-arg
 ARG NODE_ENV
@@ -18,14 +19,23 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y git
 
+# Pin thorium-web to a specific commit (default branch: develop).
+# To upgrade the reader: replace THORIUM_REF with a newer commit SHA. Changing
+# this value invalidates the build cache from this line onward — deterministic
+# on both BuildKit and the classic builder — so `make update` re-clones and
+# checks out the new commit. No floating HEAD = no surprise upstream drift.
+ARG THORIUM_REF=071c8bbf57d67396d9f7b2dca622099529a15b0a
+
 RUN git clone https://github.com/edrlab/thorium-web.git && \
-    cd thorium-web
+    cd thorium-web && \
+    git checkout "$THORIUM_REF"
     
 RUN corepack enable
 
 WORKDIR /app/thorium-web
 
-RUN --mount=type=cache,id=pnpm_store,target=/pnpm/store pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=pnpm_store,target=/pnpm/store pnpm install --frozen-lockfile --ignore-scripts
+RUN pnpm rebuild esbuild sharp unrs-resolver
 
 RUN pnpm build
 

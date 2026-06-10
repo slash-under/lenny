@@ -61,14 +61,15 @@ def test_ol_auth_status_shape():
     with patch.object(configs, "OL_S3_ACCESS_KEY", "a"), \
          patch.object(configs, "OL_S3_SECRET_KEY", "b"), \
          patch.object(configs, "OL_USERNAME", "lib@example.org"), \
-         patch.object(configs, "LENDING_ENABLED", True), \
+         patch.object(configs, "LENDING_MODE", "ol"), \
          patch.object(configs, "OL_INDEXED", False):
         status = ol_auth_status()
 
     assert status == {
         "logged_in": True,
         "username": "lib@example.org",
-        "lending_enabled": True,
+        "lending_mode": "ol",
+        "ol_ready": True,
         "ol_indexed": False,
     }
 
@@ -192,12 +193,13 @@ def reset_ol_env():
     """
     from lenny import configs
 
-    keys = ("OL_S3_ACCESS_KEY", "OL_S3_SECRET_KEY", "OL_USERNAME", "LENDING_ENABLED")
+    keys = ("OL_S3_ACCESS_KEY", "OL_S3_SECRET_KEY", "OL_USERNAME", "LENDING_MODE", "LENDING_ENABLED")
     snapshot = {k: getattr(configs, k) for k in keys}
     # Start from a clean, logged-out state.
     configs.OL_S3_ACCESS_KEY = None
     configs.OL_S3_SECRET_KEY = None
     configs.OL_USERNAME = None
+    configs.LENDING_MODE = "none"
     configs.LENDING_ENABLED = False
     try:
         yield
@@ -228,17 +230,17 @@ def test_ol_status_returns_current_state(ol_client, admin_ok):
     with patch.object(configs, "OL_S3_ACCESS_KEY", "a"), \
          patch.object(configs, "OL_S3_SECRET_KEY", "b"), \
          patch.object(configs, "OL_USERNAME", "lib@example.org"), \
-         patch.object(configs, "LENDING_ENABLED", True), \
+         patch.object(configs, "LENDING_MODE", "ol"), \
          patch.object(configs, "OL_INDEXED", False):
         resp = ol_client.get("/v1/api/admin/ol/status", headers=HDRS)
 
     assert resp.status_code == 200
-    assert resp.json() == {
-        "logged_in": True,
-        "username": "lib@example.org",
-        "lending_enabled": True,
-        "ol_indexed": False,
-    }
+    body = resp.json()
+    assert body["logged_in"] is True
+    assert body["username"] == "lib@example.org"
+    assert body["lending_mode"] == "ol"
+    assert body["ol_ready"] is True
+    assert body["ol_indexed"] is False
 
 
 def test_ol_login_success_persists_and_updates_process(ol_client, admin_ok, cache_open, reset_ol_env):
@@ -258,22 +260,22 @@ def test_ol_login_success_persists_and_updates_process(ol_client, admin_ok, cach
         assert body["logged_in"] is True
         assert body["username"] == "lib@example.org"
         assert body["screenname"] == "LibScreen"
-        assert body["lending_enabled"] is True
+        assert body["lending_mode"] == "ol"
 
         mock_acq.assert_called_once_with("lib@example.org", "hunter2")
-        # Verify we persisted the expected keys (and only those).
+        # Verify we persisted credentials + activated OL lending mode (and only those).
         args, _ = mock_env.call_args
         assert args[1] == {
             "OL_S3_ACCESS_KEY": "AKEY",
             "OL_S3_SECRET_KEY": "SKEY",
             "OL_USERNAME": "lib@example.org",
-            "LENNY_LENDING_ENABLED": "true",
+            "LENNY_LENDING_MODE": "ol",
         }
-        # In-process config was flipped so OL calls inside this worker use new keys
-        # without waiting for a container restart.
+        # In-process config updated so OL calls inside this worker use new keys.
         assert configs.OL_S3_ACCESS_KEY == "AKEY"
         assert configs.OL_S3_SECRET_KEY == "SKEY"
         assert configs.OL_USERNAME == "lib@example.org"
+        assert configs.LENDING_MODE == "ol"
         assert configs.LENDING_ENABLED is True
 
 
@@ -404,14 +406,197 @@ def test_ol_logout_clears_credentials(ol_client, admin_ok, reset_ol_env):
             "OL_S3_ACCESS_KEY": "",
             "OL_S3_SECRET_KEY": "",
             "OL_USERNAME": "",
-            "LENNY_LENDING_ENABLED": "false",
+            "LENNY_LENDING_MODE": "none",
         }
         assert configs.OL_S3_ACCESS_KEY is None
         assert configs.OL_USERNAME is None
+        assert configs.LENDING_MODE == "none"
         assert configs.LENDING_ENABLED is False
 
 
 def test_ol_logout_requires_admin(ol_client):
     with patch("lenny.routes.api.auth.verify_admin_internal_secret", return_value=False):
         resp = ol_client.post("/v1/api/admin/ol/logout", headers=HDRS)
+    assert resp.status_code == 403
+
+
+# ─── /admin/lending/mode ─────────────────────────────────────────────────────
+
+def test_get_lending_mode_returns_current_state(ol_client, admin_ok):
+    from lenny import configs
+
+    with patch.object(configs, "LENDING_MODE", "ol"), \
+         patch.object(configs, "OL_S3_ACCESS_KEY", "a"), \
+         patch.object(configs, "OL_S3_SECRET_KEY", "b"):
+        resp = ol_client.get("/v1/api/admin/lending/mode", headers=HDRS)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "ol"
+    assert body["ol_ready"] is True
+    assert body["external_auth_ready"] is False
+
+
+def test_set_lending_mode_to_ol_with_credentials(ol_client, admin_ok, reset_ol_env):
+    from lenny import configs
+
+    configs.OL_S3_ACCESS_KEY = "a"
+    configs.OL_S3_SECRET_KEY = "b"
+
+    with patch("lenny.routes.api.ol_bootstrap.update_env_file") as mock_env:
+        resp = ol_client.put("/v1/api/admin/lending/mode", headers=HDRS, json={"mode": "ol"})
+
+    assert resp.status_code == 200
+    assert resp.json()["mode"] == "ol"
+    # Mode write (ol.env) AND the external-auth flag write (auth.env) happen together.
+    mock_env.assert_any_call("/app/ol.env", {"LENNY_LENDING_MODE": "ol"})
+    mock_env.assert_any_call("/app/auth.env", {"LENNY_EXTERNAL_AUTH_ENABLED": "false"})
+    assert mock_env.call_count == 2
+    assert configs.LENDING_MODE == "ol"
+    assert configs.LENDING_ENABLED is True
+    assert configs.EXTERNAL_AUTH_ENABLED is False
+
+
+def test_set_lending_mode_to_ol_without_credentials_returns_422(ol_client, admin_ok, reset_ol_env):
+    from lenny import configs
+
+    configs.OL_S3_ACCESS_KEY = None
+    configs.OL_S3_SECRET_KEY = None
+
+    resp = ol_client.put("/v1/api/admin/lending/mode", headers=HDRS, json={"mode": "ol"})
+    assert resp.status_code == 422
+
+
+def test_set_lending_mode_to_none(ol_client, admin_ok, reset_ol_env):
+    from lenny import configs
+
+    with patch("lenny.routes.api.ol_bootstrap.update_env_file") as mock_env:
+        resp = ol_client.put("/v1/api/admin/lending/mode", headers=HDRS, json={"mode": "none"})
+
+    assert resp.status_code == 200
+    assert resp.json()["mode"] == "none"
+    mock_env.assert_any_call("/app/ol.env", {"LENNY_LENDING_MODE": "none"})
+    mock_env.assert_any_call("/app/auth.env", {"LENNY_EXTERNAL_AUTH_ENABLED": "false"})
+    assert mock_env.call_count == 2
+    assert configs.LENDING_ENABLED is False
+    assert configs.EXTERNAL_AUTH_ENABLED is False
+
+
+def test_set_lending_mode_external_not_configured_returns_422(ol_client, admin_ok, reset_ol_env):
+    """External requires a configured OIDC provider; unconfigured → 422 (was 501)."""
+    from lenny import configs
+
+    with patch.object(configs, "OAUTH_CLIENT_ID", None), \
+         patch.object(configs, "OAUTH_DISCOVERY_URL", None), \
+         patch.object(configs, "OAUTH_REDIRECT_URI", None):
+        resp = ol_client.put("/v1/api/admin/lending/mode", headers=HDRS, json={"mode": "external"})
+    assert resp.status_code == 422
+
+
+def test_set_lending_mode_external_when_configured_syncs_flag(ol_client, admin_ok, reset_ol_env):
+    """External + configured provider → 200, mode persisted AND external flag enabled."""
+    from lenny import configs
+
+    with patch("lenny.routes.api._external_configured", return_value=True), \
+         patch("lenny.routes.api.ol_bootstrap.update_env_file") as mock_env:
+        resp = ol_client.put("/v1/api/admin/lending/mode", headers=HDRS, json={"mode": "external"})
+
+    assert resp.status_code == 200
+    assert resp.json()["mode"] == "external"
+    mock_env.assert_any_call("/app/ol.env", {"LENNY_LENDING_MODE": "external"})
+    mock_env.assert_any_call("/app/auth.env", {"LENNY_EXTERNAL_AUTH_ENABLED": "true"})
+    assert configs.LENDING_MODE == "external"
+    assert configs.LENDING_ENABLED is True
+    assert configs.EXTERNAL_AUTH_ENABLED is True
+
+
+def test_post_auth_mode_settings_external_when_configured(ol_client, admin_ok, reset_ol_env):
+    """The lenny-app alias path must behave identically to the canonical PUT
+    (no 501-vs-200 divergence) and sync the flag."""
+    from lenny import configs
+
+    with patch("lenny.routes.api._external_configured", return_value=True), \
+         patch("lenny.routes.api.ol_bootstrap.update_env_file") as mock_env:
+        resp = ol_client.post(
+            "/v1/api/admin/settings/auth-mode", headers=HDRS, json={"lending_mode": "external"}
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["lending_mode"] == "external"
+    mock_env.assert_any_call("/app/ol.env", {"LENNY_LENDING_MODE": "external"})
+    mock_env.assert_any_call("/app/auth.env", {"LENNY_EXTERNAL_AUTH_ENABLED": "true"})
+    assert configs.EXTERNAL_AUTH_ENABLED is True
+
+
+def test_toggle_auth_mode_enable_promotes_to_external(ol_client, admin_ok, reset_ol_env):
+    """POST /admin/auth/mode {enabled:true} (provider configured) → mode=external."""
+    from lenny import configs
+
+    with patch("lenny.routes.api._external_configured", return_value=True), \
+         patch("lenny.routes.api.ol_bootstrap.update_env_file") as mock_env:
+        resp = ol_client.post("/v1/api/admin/auth/mode", headers=HDRS, json={"enabled": True})
+
+    assert resp.status_code == 200
+    assert resp.json()["enabled"] is True
+    mock_env.assert_any_call("/app/ol.env", {"LENNY_LENDING_MODE": "external"})
+    mock_env.assert_any_call("/app/auth.env", {"LENNY_EXTERNAL_AUTH_ENABLED": "true"})
+    assert configs.LENDING_MODE == "external"
+    assert configs.EXTERNAL_AUTH_ENABLED is True
+
+
+def test_toggle_auth_mode_enable_unconfigured_returns_422(ol_client, admin_ok, reset_ol_env):
+    """Cannot enable external auth when the provider is not configured."""
+    from lenny import configs
+
+    with patch.object(configs, "OAUTH_CLIENT_ID", None), \
+         patch.object(configs, "OAUTH_DISCOVERY_URL", None), \
+         patch.object(configs, "OAUTH_REDIRECT_URI", None):
+        resp = ol_client.post("/v1/api/admin/auth/mode", headers=HDRS, json={"enabled": True})
+    assert resp.status_code == 422
+
+
+def test_toggle_auth_mode_disable_demotes_external_to_none(ol_client, admin_ok, reset_ol_env):
+    """Disabling external auth while mode is external demotes the mode to none
+    (the check on the OIDC page goes away from true to false)."""
+    from lenny import configs
+
+    with patch.object(configs, "LENDING_MODE", "external"), \
+         patch("lenny.routes.api.ol_bootstrap.update_env_file") as mock_env:
+        resp = ol_client.post("/v1/api/admin/auth/mode", headers=HDRS, json={"enabled": False})
+
+    assert resp.status_code == 200
+    assert resp.json()["enabled"] is False
+    mock_env.assert_any_call("/app/ol.env", {"LENNY_LENDING_MODE": "none"})
+    mock_env.assert_any_call("/app/auth.env", {"LENNY_EXTERNAL_AUTH_ENABLED": "false"})
+    assert configs.LENDING_MODE == "none"
+    assert configs.EXTERNAL_AUTH_ENABLED is False
+
+
+def test_toggle_auth_mode_disable_preserves_ol_mode(ol_client, admin_ok, reset_ol_env):
+    """Disabling external auth while mode is ol leaves the ol mode intact and
+    only clears the flag."""
+    from lenny import configs
+
+    with patch.object(configs, "LENDING_MODE", "ol"), \
+         patch("lenny.routes.api.ol_bootstrap.update_env_file") as mock_env:
+        resp = ol_client.post("/v1/api/admin/auth/mode", headers=HDRS, json={"enabled": False})
+
+    assert resp.status_code == 200
+    mock_env.assert_called_once_with("/app/auth.env", {"LENNY_EXTERNAL_AUTH_ENABLED": "false"})
+    assert configs.EXTERNAL_AUTH_ENABLED is False
+
+
+def test_toggle_auth_mode_rejects_string_enabled(ol_client, admin_ok):
+    resp = ol_client.post("/v1/api/admin/auth/mode", headers=HDRS, json={"enabled": "true"})
+    assert resp.status_code == 400
+
+
+def test_set_lending_mode_invalid_returns_400(ol_client, admin_ok):
+    resp = ol_client.put("/v1/api/admin/lending/mode", headers=HDRS, json={"mode": "banana"})
+    assert resp.status_code == 400
+
+
+def test_set_lending_mode_requires_admin(ol_client):
+    with patch("lenny.routes.api.auth.verify_admin_internal_secret", return_value=False):
+        resp = ol_client.put("/v1/api/admin/lending/mode", headers=HDRS, json={"mode": "none"})
     assert resp.status_code == 403

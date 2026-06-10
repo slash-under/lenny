@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from lenny.configs import SEED, OTP_SERVER, ADMIN_USERNAME, ADMIN_PASSWORD, ADMIN_INTERNAL_SECRET, ADMIN_SALT
-from lenny.core.openlibrary import ol_auth_headers
+from lenny.core.openlibrary import ol_auth_headers, _REDACT_HOOKS
 from lenny.core.exceptions import LendingNotConfiguredError
 from lenny.core.cache import Cache
 from lenny.core.exceptions import RateLimitError
@@ -77,27 +77,21 @@ def _get_serializer():
     return SERIALIZER
 
 def create_session_cookie(email: str, ip: str = None) -> str:
-    """Returns a signed + encrypted session cookie."""
+    """Returns a signed + encrypted session cookie. Always uses dict format."""
     serializer = _get_serializer()
+    data = {"email": email}
     if ip:
-        # New format: serialize both email and IP (no need to store SEED in cookie)
-        data = {"email": email, "ip": ip}
-        return serializer.dumps(data)
-    else:
-        # Backward compatibility: serialize just email
-        return serializer.dumps(email)
+        data["ip"] = ip
+    return serializer.dumps(data)
 
 def get_authenticated_email(session) -> Optional[str]:
-    """Retrieves and verifies email from signed cookie."""
+    """Retrieves and verifies email from signed cookie. Rejects old-format (non-dict) cookies."""
     try:
         serializer = _get_serializer()
         data = serializer.loads(session, max_age=COOKIE_TTL)
         if isinstance(data, dict):
-            # New format with IP
             return data.get("email")
-        else:
-            # Old format, just email
-            return data
+        return None  # old-format plain-email cookies rejected
     except BadSignature:
         return None
 
@@ -109,14 +103,13 @@ def verify_session_cookie(session, client_ip: str = None):
         serializer = _get_serializer()
         data = serializer.loads(session, max_age=COOKIE_TTL)
         if isinstance(data, dict):
-            # New format with IP verification
             stored_ip = data.get("ip")
             if client_ip and stored_ip and client_ip != stored_ip:
                 return None  # IP mismatch
             return data
-        else:
-            # Old format, just email (no IP verification possible)
-            return data
+        # Old-format cookies (plain email string) lack IP binding — reject them
+        # so stolen cookies from before IP binding cannot be replayed.
+        return None
     except BadSignature:
         return None
         
@@ -155,15 +148,22 @@ class OTP:
     @classmethod
     def _check_lending_enabled(cls) -> None:
         from lenny import configs
-        if not configs.LENDING_ENABLED:
-            raise LendingNotConfiguredError("Lending is not enabled on this instance.")
+        # File-fresh read so the OTP borrow gate agrees across workers right
+        # after an admin mode change (per-worker globals can be stale).
+        if configs.read_lending_mode() != 'ol':
+            raise LendingNotConfiguredError(
+                "OL lending is not the active lending mode. "
+                "Set LENNY_LENDING_MODE=ol via the admin panel."
+            )
         if not (configs.OL_S3_ACCESS_KEY and configs.OL_S3_SECRET_KEY):
-            raise LendingNotConfiguredError("Lending is not configured: Open Library credentials are missing. Run 'make ol-login'.")
+            raise LendingNotConfiguredError(
+                "OL lending is active but credentials are missing. Run 'make ol-login'."
+            )
 
     @classmethod
     def issue(cls, email: str, ip_address: str) -> dict:
         cls._check_lending_enabled()
-        with httpx.Client(http2=True, verify=False, timeout=TIMEOUT) as client:
+        with httpx.Client(http2=True, verify=False, timeout=TIMEOUT, event_hooks=_REDACT_HOOKS) as client:
             return client.post(
                 f"{OTP_SERVER}/account/otp/issue",
                 params={"email": email, "ip": ip_address},
@@ -174,7 +174,7 @@ class OTP:
     @classmethod
     def redeem(cls, email: str, ip_address: str, otp: str) -> bool:
         cls._check_lending_enabled()
-        with httpx.Client(http2=True, verify=False, timeout=TIMEOUT) as client:
+        with httpx.Client(http2=True, verify=False, timeout=TIMEOUT, event_hooks=_REDACT_HOOKS) as client:
             return "success" in client.post(
                 f"{OTP_SERVER}/account/otp/redeem",
                 params={"email": email, "ip": ip_address, "otp": otp},

@@ -5,6 +5,7 @@ from botocore.exceptions import ClientError
 import socket
 import ipaddress
 import requests as _requests
+import httpx as _httpx
 import logging
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,67 @@ def _make_url(path):
 
 LennyDataProvider.BASE_URL = _make_url("/v1/api/")
 
+# empty_catalog / build_catalog / build_publication are not yet in the
+# pyopds2_lenny library (pinned to commit 356518d). Patch them here so
+# routes and tests can use/mock them without touching the library.
+
+def _lenny_catalog_links(base: str) -> list:
+    return [
+        Link(rel="self", href=f"{base}opds", type="application/opds+json"),
+        Link(
+            rel="search",
+            href=f"{base}opds/search{{?query}}",
+            type="application/opds+json",
+            templated=True,
+        ),
+        Link(rel="http://opds-spec.org/shelf", href=f"{base}shelf", type="application/opds+json"),
+        Link(rel="profile", href=f"{base}profile", type="application/opds-profile+json"),
+    ]
+
+
+@classmethod
+def _lenny_empty_catalog(cls, limit: int = 50, auth_mode_direct: bool = False, title: str = "Lenny Catalog") -> dict:
+    catalog = Catalog(
+        metadata=Metadata(title=title, numberOfItems=0),
+        links=_lenny_catalog_links(cls.BASE_URL),
+        publications=[],
+    )
+    return catalog.model_dump(exclude_none=True)
+
+
+@classmethod
+def _lenny_build_catalog(cls, search_response, auth_mode_direct: bool = False, title: str = "Lenny Catalog") -> dict:
+    publications = []
+    for record in search_response.records:
+        if isinstance(record, LennyDataRecord):
+            record.auth_mode_direct = auth_mode_direct
+        pub = record.to_publication()
+        pub_dict = pub.model_dump(exclude_none=True)
+        pub_dict["links"] = [lnk.model_dump(exclude_none=True) for lnk in record.links()]
+        publications.append(pub_dict)
+    catalog = Catalog(
+        metadata=Metadata(title=title, numberOfItems=len(publications)),
+        links=_lenny_catalog_links(cls.BASE_URL),
+        publications=publications,
+    )
+    return catalog.model_dump(exclude_none=True)
+
+
+@classmethod
+def _lenny_build_publication(cls, record, auth_mode_direct: bool = False) -> dict:
+    if isinstance(record, LennyDataRecord):
+        record.auth_mode_direct = auth_mode_direct
+    pub = record.to_publication()
+    pub_dict = pub.model_dump(exclude_none=True)
+    pub_dict["links"] = [lnk.model_dump(exclude_none=True) for lnk in record.links()]
+    return pub_dict
+
+
+LennyDataProvider.empty_catalog = _lenny_empty_catalog
+LennyDataProvider.build_catalog = _lenny_build_catalog
+LennyDataProvider.build_publication = _lenny_build_publication
+
+
 class LennyAPI:
 
     DEFAULT_LIMIT = 50
@@ -77,6 +139,9 @@ class LennyAPI:
     def auth_check(cls, item, session: str=None, request: Request=None):
         """
         Checks if the user is allowed to access the book.
+
+        For encrypted items: verifies session, then checks for an active loan.
+        Does NOT auto-borrow — callers that want auto-borrow use the /borrow endpoint.
         """
         success = {"success": "authenticated"}
         ip = request.client.host
@@ -93,7 +158,7 @@ class LennyAPI:
                 }
             email = email_data.get("email") if isinstance(email_data, dict) else email_data
             success['email'] = email
-            if not (loan := item.borrow(email)):
+            if not Loan.exists(item.id, email):
                 return {
                     "error": "unauthorized",
                     "url": f"/v1/api/items/{item.openlibrary_edition}/borrow",
@@ -154,17 +219,22 @@ class LennyAPI:
 
         limit = limit or cls.DEFAULT_LIMIT
         offset = offset or 0
-        items = cls.get_enriched_items(olid=olid, offset=offset, limit=limit)
+        try:
+            items = cls.get_enriched_items(olid=olid, offset=offset, limit=limit)
+        except (_requests.exceptions.RequestException, _httpx.HTTPError) as e:
+            logger.warning(f"Open Library unreachable during OPDS feed build: {e}")
+            return LennyDataProvider.empty_catalog(limit=limit, auth_mode_direct=use_direct)
+
         if not items:
             return LennyDataProvider.empty_catalog(limit=limit, auth_mode_direct=use_direct)
         query, lenny_ids, total = cls._build_query_and_lenny_ids(items)
         lenny_ids_map = {k: v for k, v in zip(items.keys(), lenny_ids) if v is not None}
         lenny_ids_arg = lenny_ids_map if lenny_ids_map else None
-        
+
         # Build maps for each item's encryption and availability status
         encryption_map = {}
         borrowable_map = {}
-        
+
         for rec in items.values():
             lenny_item = getattr(rec, "lenny", None)
             if lenny_item is None:
@@ -185,7 +255,7 @@ class LennyAPI:
                 encryption_map=encryption_map,
                 borrowable_map=borrowable_map,
             )
-        except (_requests.exceptions.SSLError, _requests.exceptions.ConnectionError, _requests.exceptions.Timeout) as e:
+        except (_requests.exceptions.RequestException, _httpx.HTTPError) as e:
             logger.warning(f"Open Library unreachable during OPDS feed build: {e}")
             return LennyDataProvider.empty_catalog(limit=limit, auth_mode_direct=use_direct)
 
@@ -243,17 +313,23 @@ class LennyAPI:
         ]
 
         collected = []
-        for batch in batches:
-            edition_keys = " OR ".join(f"OL{olid}M" for olid in batch)
-            ol_query = f"{query} AND edition_key:({edition_keys})"
+        try:
+            for batch in batches:
+                edition_keys = " OR ".join(f"OL{olid}M" for olid in batch)
+                ol_query = f"{query} AND edition_key:({edition_keys})"
 
-            for record in OpenLibrary.search(query=ol_query, limit=cls.SEARCH_BATCH_SIZE):
-                collected.append(record)
+                for record in OpenLibrary.search(query=ol_query, limit=cls.SEARCH_BATCH_SIZE):
+                    collected.append(record)
+                    if len(collected) >= limit:
+                        break
+
                 if len(collected) >= limit:
                     break
-
-            if len(collected) >= limit:
-                break
+        except (_requests.exceptions.RequestException, _httpx.HTTPError) as e:
+            logger.warning(f"Open Library unreachable during search: {e}")
+            return LennyDataProvider.empty_catalog(
+                title=f"Search results for: {query}", auth_mode_direct=use_direct
+            )
 
         if not collected:
             return LennyDataProvider.empty_catalog(
@@ -287,13 +363,19 @@ class LennyAPI:
 
         # Re-query via LennyDataProvider to get properly structured records
         provider_query = f"edition_key:({' OR '.join(matched_query_parts)})"
-        search_response = LennyDataProvider.search(
-            query=provider_query,
-            limit=limit,
-            lenny_ids=lenny_ids_map,
-            encryption_map=encryption_map,
-            borrowable_map=borrowable_map,
-        )
+        try:
+            search_response = LennyDataProvider.search(
+                query=provider_query,
+                limit=limit,
+                lenny_ids=lenny_ids_map,
+                encryption_map=encryption_map,
+                borrowable_map=borrowable_map,
+            )
+        except (_requests.exceptions.RequestException, _httpx.HTTPError) as e:
+            logger.warning(f"Open Library unreachable during search: {e}")
+            return LennyDataProvider.empty_catalog(
+                title=f"Search results for: {query}", auth_mode_direct=use_direct
+            )
 
         for record in search_response.records:
             if isinstance(record, LennyDataRecord):
@@ -311,11 +393,15 @@ class LennyAPI:
         return f
 
     @classmethod
-    def _resolve_ip_to_hostname(cls, client_ip: str) -> str:
+    def _resolve_ip_to_hostname(cls, client_ip: str) -> Optional[str]:
         try:
-            # Reverse DNS lookup
-            client_hostname, _, _ = socket.gethostbyaddr(client_ip)
-        except socket.herror:
+            hostname, _, _ = socket.gethostbyaddr(client_ip)
+            # Forward-confirmed rDNS: PTR must resolve back to the same IP to
+            # prevent spoofing via attacker-controlled PTR records.
+            if socket.gethostbyname(hostname) != client_ip:
+                return None
+            return hostname
+        except (socket.herror, socket.gaierror):
             return None
     
     @classmethod
@@ -400,7 +486,7 @@ class LennyAPI:
                 else:
                     cls.upload_file(fp, f"{filename}{ext}")
             else:
-                raise InvalidFileError("Invalid format {ext} for {fp.filename}")
+                raise InvalidFileError(f"Invalid format {ext} for {fp.filename}")
         if not formats:
             raise InvalidFileError("No valid files provided")
         return formats
@@ -451,13 +537,13 @@ class LennyAPI:
     @classmethod
     def get_borrowed_items(cls, email: str):
         """
-        Returns a list of active (not returned) Loan objects for the given user email.
+        Returns active (non-returned, non-expired) Loan objects for the patron.
         Ensures openlibrary_edition is set for each loan.
         """
         email_hash = hash_email(email)
         loans = db.query(Loan).filter(
             Loan.patron_email_hash == email_hash,
-            Loan.returned_at == None
+            *Loan._active_filters(),
         ).all()
         enriched_loans = []
         for loan in loans:

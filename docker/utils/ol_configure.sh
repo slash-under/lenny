@@ -23,7 +23,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────
 
 LENNY_ROOT="${LENNY_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-ENV_FILE="$LENNY_ROOT/.env"
+ENV_FILE="$LENNY_ROOT/ol.env"
 CONTAINER="${LENNY_API_CONTAINER:-lenny_api}"
 COMPOSE_FILE="$LENNY_ROOT/compose.yaml"
 
@@ -35,7 +35,7 @@ error() { printf '%s[ol-login]%s %s\n' "$RED"    "$NC" "$*" >&2; }
 
 # ── Preflight
 if [ ! -f "$ENV_FILE" ]; then
-    error ".env not found at $ENV_FILE. Run 'make configure' first."
+    error "ol.env not found at $ENV_FILE. Run 'make configure' first."
     exit 1
 fi
 if ! command -v docker >/dev/null 2>&1; then
@@ -181,7 +181,7 @@ env_set OL_S3_ACCESS_KEY "$access"
 env_set OL_S3_SECRET_KEY "$secret"
 env_set OL_USERNAME "$OL_EMAIL"
 # Completing auth means lending is now functional; flip the flag on.
-env_set LENNY_LENDING_ENABLED "true"
+env_set LENNY_LENDING_MODE "ol"
 chmod 600 "$ENV_FILE"
 
 # ── Restart API so the new env is picked up

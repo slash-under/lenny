@@ -1,14 +1,14 @@
-#!/usr/bin/env python 
+#!/usr/bin/env python
 
 """
     Item Model for Lenny,
     including the definition of the Item table and its attributes.
-    
+
     :copyright: (c) 2015 by AUTHORS
     :license: see LICENSE for more details
 """
 
-from sqlalchemy import Column, String, Boolean, BigInteger, Integer, DateTime, Enum as SQLAlchemyEnum, Index
+from sqlalchemy import Column, String, Boolean, BigInteger, Integer, DateTime, Enum as SQLAlchemyEnum, Index, or_
 from sqlalchemy.sql import func
 from sqlalchemy import ForeignKey
 from sqlalchemy.orm import relationship
@@ -20,7 +20,8 @@ from lenny.core.exceptions import (
     LoanNotFoundError,
     EmailNotFoundError,
     DatabaseInsertError,
-    BookUnavailableError
+    BookUnavailableError,
+    PatronLoanLimitError,
 )
 import enum
 import datetime
@@ -35,19 +36,19 @@ class Item(Base):
     __table_args__ = (
         Index('idx_items_openlibrary_edition', 'openlibrary_edition'),
     )
-    
+
     id = Column(BigInteger, primary_key=True)
     openlibrary_edition = Column(BigInteger, nullable=False)
     encrypted = Column(Boolean, default= False, nullable=False)
     formats = Column(SQLAlchemyEnum(FormatEnum), nullable=False)
     created_at = Column(DateTime(timezone=True), default=func.now())
     updated_at = Column(DateTime(timezone=True), default=func.now(), onupdate=func.now())
-    
+
     @hybrid_property
     def is_login_required(self):
         """True if the item is encrypted and requires login."""
         return self.encrypted
-    
+
     @hybrid_property
     def num_lendable_total(self):
         """Total number of lendable copies."""
@@ -57,13 +58,13 @@ class Item(Base):
     def available_copies(self):
         """Number of copies currently available for lending.
 
-        This queries the Loan table for active (not returned) loans
+        This queries the Loan table for active (not returned, not expired) loans
         on this item and subtracts from `num_lendable_total`.
         """
         try:
             active_loans = db.query(Loan).filter(
                 Loan.item_id == getattr(self, "id"),
-                Loan.returned_at == None
+                *Loan._active_filters(),
             ).count()
             available = getattr(self, "num_lendable_total", 1) - active_loans
             return max(0, int(available))
@@ -85,17 +86,17 @@ class Item(Base):
     def is_readable(self):
         """Publicly readable if not encrypted."""
         return not self.encrypted
-    
+
     @hybrid_property
     def is_lendable(self):
         """Borrow if encrypted else not."""
         return bool(self.encrypted)
-    
+
     @hybrid_property
     def is_waitlistable(self):
         """Waitlist if encrypted else not."""
         return bool(self.encrypted)
-    
+
     @hybrid_property
     def is_printdisabled(self):
         """Always print disabled."""
@@ -123,45 +124,73 @@ class Item(Base):
             raise LoanNotRequiredError
 
         if not email:
-            raise EmailNotFoundError("Email required to borrow encrypted items.")
+            raise EmailNotFoundError("Email required to return encrypted items.")
 
-        if loan := Loan.exists(self.id, email):
+        # Use exists_any (no due_date filter) so expired loans can still be
+        # explicitly returned — keeps returned_at as a patron action, not auto-expiry.
+        if loan := Loan.exists_any(self.id, email):
             return loan.finalize()
 
         raise LoanNotFoundError("Patron has no active loan for this book.")
-    
+
     def is_encrypted_item(self):
         return self.encrypted
 
     def borrow(self, email: str):
-        """
-        Borrow a book for a patron.
-        
-        Args:
-            email: Patron's email address for loan tracking.
-            
-        Returns:
-            Loan object (existing if already borrowed, new otherwise).
-            
+        """Borrow a book for a patron.
+
+        Serializes concurrent borrow attempts for the same item by acquiring a
+        row-level lock (SELECT FOR UPDATE) on the Item row before any check.
+        All availability and limit checks run inside the lock so the check and
+        the INSERT are atomic from the database's perspective.
+
         Raises:
-            LoanNotRequiredError: If item is open-access (no login needed).
-            EmailNotFoundError: If email is not provided.
-            BookUnavailableError: If no copies are available.
+            LoanNotRequiredError: Item is open-access.
+            EmailNotFoundError: No email provided.
+            PatronLoanLimitError: Patron has reached their concurrent loan limit.
+            BookUnavailableError: No copies available for this item.
         """
         if not self.is_login_required:
             raise LoanNotRequiredError
-        
+
         if not email:
             raise EmailNotFoundError("Email is required to borrow encrypted items.")
 
+        from lenny import configs
+
         hashed_email = hash_email(email)
-        
-        if active_loan := Loan.exists(self.id, hashed_email, hashed=True):
-            return active_loan
-        
-        if not self.is_borrowable:
+
+        # Acquire row-level lock on the Item. Concurrent borrow() calls for the
+        # same item block here until the current transaction commits/rolls back.
+        # populate_existing=True forces a DB round-trip even if item is in the
+        # session identity map, ensuring we read fresh state under the lock.
+        db.query(Item).filter(
+            Item.id == self.id
+        ).with_for_update().populate_existing().first()
+
+        # 1. Idempotent: patron already has an active loan for this item.
+        if existing := Loan.exists(self.id, hashed_email, hashed=True):
+            return existing
+
+        # 2. Per-patron concurrent loan limit.
+        patron_active = db.query(Loan).filter(
+            Loan.patron_email_hash == hashed_email,
+            *Loan._active_filters(),
+        ).count()
+        loan_limit = configs.get_loan_limit()
+        if patron_active >= loan_limit:
+            raise PatronLoanLimitError(
+                f"Loan limit of {loan_limit} reached. Return a book before borrowing another."
+            )
+
+        # 3. Per-item copy availability (fresh COUNT under lock).
+        item_active = db.query(Loan).filter(
+            Loan.item_id == self.id,
+            *Loan._active_filters(),
+        ).count()
+        if item_active >= self.num_lendable_total:
             raise BookUnavailableError("No copies available for borrowing.")
-        
+
         return Loan.create(self.id, hashed_email, hashed=True)
 
 
@@ -170,6 +199,7 @@ class Loan(Base):
     __table_args__ = (
         Index('idx_loans_item_patron_returned', 'item_id', 'patron_email_hash', 'returned_at'),
         Index('idx_loans_item_returned', 'item_id', 'returned_at'),
+        Index('idx_loans_due_date', 'due_date'),
     )
 
     id = Column(BigInteger, primary_key=True)
@@ -177,32 +207,61 @@ class Loan(Base):
     patron_email_hash = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), default=func.now())
     returned_at = Column(DateTime(timezone=True), nullable=True)
+    due_date = Column(DateTime(timezone=True), nullable=True)  # NULL = no expiry
 
     item = relationship('Item', back_populates='loans')
-    
-    @classmethod 
+
+    @classmethod
+    def _active_filters(cls):
+        """SQLAlchemy filter clauses for loans that are active right now:
+        not manually returned AND not past their due date."""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return [
+            cls.returned_at == None,
+            or_(cls.due_date == None, cls.due_date > now),
+        ]
+
+    @classmethod
     def exists(cls, item_id, email, hashed=False):
+        """Return an active (non-returned, non-expired) loan, or None."""
         hashed_email = email if hashed else hash_email(email)
         return db.query(Loan).filter(
             Loan.item_id == item_id,
             Loan.patron_email_hash == hashed_email,
-            Loan.returned_at == None
+            *cls._active_filters(),
+        ).first()
+
+    @classmethod
+    def exists_any(cls, item_id, email, hashed=False):
+        """Return any non-returned loan (including expired), or None.
+        Used by unborrow() so patrons can finalize expired loans."""
+        hashed_email = email if hashed else hash_email(email)
+        return db.query(Loan).filter(
+            Loan.item_id == item_id,
+            Loan.patron_email_hash == hashed_email,
+            Loan.returned_at == None,
         ).first()
 
     @classmethod
     def create(cls, item_id, email, hashed=False):
+        from lenny import configs
         hashed_email = email if hashed else hash_email(email)
+        due = None
+        duration_days = configs.get_loan_duration_days()
+        if duration_days > 0:
+            due = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=duration_days)
         try:
-            loan = cls(item_id=item_id, patron_email_hash=hashed_email)
+            loan = cls(item_id=item_id, patron_email_hash=hashed_email, due_date=due)
             db.add(loan)
             db.commit()
             return loan
         except Exception as e:
             db.rollback()
             raise DatabaseInsertError(f"Failed to create loan record: {str(e)}.")
+
     def finalize(self):
         try:
-            self.returned_at = datetime.datetime.utcnow()
+            self.returned_at = datetime.datetime.now(datetime.timezone.utc)
             db.add(self)
             db.commit()
             return self

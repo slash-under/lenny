@@ -6,8 +6,15 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y git ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN corepack enable
 
+# Pin lenny-app to a specific commit (default branch: main).
+# To upgrade the admin frontend: replace LENNY_APP_REF with a newer commit SHA.
+# Changing this value invalidates the build cache from this line onward —
+# deterministic on both BuildKit and the classic builder — so `make update`
+# re-clones and checks out the new commit. No floating HEAD = no surprise drift.
+ARG LENNY_APP_REF=e8435c3d6f16e9749bf25832e6c14f6da4c4ae0a
 
-RUN git clone https://github.com/ArchiveLabs/lenny-app .
+RUN git clone https://github.com/ArchiveLabs/lenny-app . && \
+    git checkout "$LENNY_APP_REF"
 
 # Install all workspace deps (no cache mount — fully clean install)
 RUN pnpm install --frozen-lockfile

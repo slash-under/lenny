@@ -44,11 +44,13 @@ def mock_lending():
 @pytest.fixture
 def mock_item_exists(mock_lending):
      # Mock Item.exists to return a dummy item object
-     with patch("lenny.core.models.Item.exists") as mock:
+     with patch("lenny.core.models.Item.exists") as mock, \
+          patch("lenny.core.models.Loan.exists") as mock_loan_exists:
          mock_item = MagicMock()
-         # Setup mock item to allow valid borrow
+         mock_item.is_login_required = True
          mock_item.borrow.return_value = True
          mock.return_value = mock_item
+         mock_loan_exists.return_value = MagicMock()  # truthy = loan found
          yield mock
          
 def test_direct_borrow_unauthenticated_oauth_mode(mock_auth, mock_item_exists):

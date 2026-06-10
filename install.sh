@@ -133,16 +133,17 @@ else
     INDEXED=0
 fi
 
-# These env vars flow through to configure.sh's heredoc so they end up in .env.
-if [ "$LENDING" = "1" ]; then LENDING_ENV=true; else LENDING_ENV=false; fi
+# These env vars flow through to configure.sh's heredoc so they end up in ol.env.
+# LENNY_LENDING_MODE=ol means OL lending is active; none means credentials stored but inactive.
+if [ "$LENDING" = "1" ]; then LENDING_MODE_ENV=ol; else LENDING_MODE_ENV=none; fi
 if [ "$INDEXED" = "1" ]; then INDEXED_ENV=true; else INDEXED_ENV=false; fi
-export LENNY_LENDING_ENABLED="$LENDING_ENV"
+export LENNY_LENDING_MODE="$LENDING_MODE_ENV"
 export LENNY_OL_INDEXED="$INDEXED_ENV"
 
 cd lenny
 
 # Preserve the env vars through sudo so configure.sh picks them up.
-sudo -E env LENNY_LENDING_ENABLED="$LENNY_LENDING_ENABLED" LENNY_OL_INDEXED="$LENNY_OL_INDEXED" \
+sudo -E env LENNY_LENDING_MODE="$LENNY_LENDING_MODE" LENNY_OL_INDEXED="$LENNY_OL_INDEXED" \
      make tunnel configure rebuild
 
 # ─── Post-rebuild: Open Library auth (if lending enabled) ────────────
