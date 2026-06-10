@@ -49,7 +49,7 @@ fi
 # future builds fast while preventing unbounded disk growth.
 echo "Pruning dangling images and capping build cache..."
 docker image prune -f || true
-docker builder prune -f --keep-storage=2gb || true
+docker builder prune -f --reserved-space=2gb || true
 
 # Restart all services
 $COMPOSE_CMD -p "$LENNY_COMPOSE_PROJECT" up -d

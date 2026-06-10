@@ -37,6 +37,7 @@ services:
     image: postgres:16
     container_name: lenny_db
     restart: always
+    entrypoint: ["/bin/sh", "/pg_tune.sh"]
     environment:
       POSTGRES_DB: ${DB_NAME}
       POSTGRES_USER: ${DB_USER}
@@ -45,6 +46,7 @@ services:
       - "127.0.0.1:${DB_PORT}:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
+      - ./docker/utils/pg_tune.sh:/pg_tune.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -h localhost || exit 1"]
       interval: 5s
@@ -104,6 +106,7 @@ services:
       - PORT=4000
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
       - LENNY_INTERNAL_API_URL=http://lenny_api:1337/v1/api
+      - NODE_OPTIONS=--max-old-space-size=${LENNY_ADMIN_NODE_HEAP_MB:-384}
     depends_on:
       api:
         condition: service_healthy
