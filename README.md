@@ -44,6 +44,7 @@
 - [Health Check](#health-check)
 - [Testing Readium Server](#testing-readium-server)
 - [Rebuilding](#rebuilding)
+- [Docker Maintenance](#docker-maintenance)
 - [FAQs](#faqs)
 - [Tests](#tests)
 - [Project Structure](#project-structure)
@@ -413,6 +414,56 @@ make redeploy
 # Full rebuild from scratch (WARNING: wipes database)
 make rebuild
 ```
+
+---
+
+## Docker Maintenance
+
+Useful commands for keeping the Docker environment healthy on the host machine.
+
+### Free Disk Space
+
+Over time, old build layers and untagged images accumulate. Run this periodically (or after a heavy `make update`) to reclaim disk space:
+
+```sh
+make prune
+```
+
+Removes dangling images (old untagged builds) and caps the BuildKit cache at 2 GB. Safe — never touches running containers, named volumes, or database data.
+
+### Check Resource Usage
+
+```sh
+docker stats              # live CPU/memory per container
+docker system df          # disk usage breakdown (images, containers, volumes, cache)
+docker builder du         # build cache size specifically
+```
+
+### Useful One-Liners
+
+```sh
+# See all running Lenny containers
+docker ps --filter name=lenny
+
+# Follow logs for a specific service
+docker logs -f lenny_api
+docker logs -f lenny_admin
+
+# Restart a single service without full redeploy
+docker compose restart api
+
+# Shell into the API container
+docker exec -it lenny_api bash
+```
+
+### Memory Tuning
+
+On machines with limited RAM, tune these in your `.env` before running `make update`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LENNY_WORKERS` | `2` | uvicorn worker processes — reduce to `1` on very small machines |
+| `LENNY_ADMIN_NODE_HEAP_MB` | `384` | Node.js heap cap for the admin UI — raise on machines with 8+ GB RAM |
 
 ---
 
