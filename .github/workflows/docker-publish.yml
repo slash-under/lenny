@@ -24,7 +24,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  ORG: archivelabs
+  ORG: slash-under
 
 # ──────────────────────────────────────────────
 # Helper: reusable composite for each service
